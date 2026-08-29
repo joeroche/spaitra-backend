@@ -1,0 +1,29 @@
+[Unit]
+Description=Spaitra core backend
+After=network.target
+
+[Service]
+Type=simple
+User=spaitra
+Group=spaitra
+UMask=0077
+WorkingDirectory=__REPO_ROOT__
+EnvironmentFile=/opt/spaitra/.env
+ExecCondition=/bin/sh -c '[ "${ENABLE_CORE_SERVICE:-1}" = "1" ]'
+ExecStart=/bin/bash -lc 'exec __REPO_ROOT__/venv-core/bin/gunicorn \
+    -w "${CORE_GUNICORN_WORKERS:-1}" \
+    -k geventwebsocket.gunicorn.workers.GeventWebSocketWorker \
+    -b 127.0.0.1:5000 \
+    --worker-connections "${CORE_GUNICORN_WORKER_CONNECTIONS:-1000}" \
+    --worker-tmp-dir /dev/shm \
+    --keep-alive 5 \
+    --timeout 0 \
+    --access-logfile - \
+    services.core.wsgi:application'
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

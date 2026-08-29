@@ -1,0 +1,12 @@
+# Deprecated legacy unit template intentionally disabled.
+# Use deploy/spaitra-core.service instead.
+[Unit]
+Description=Deprecated Spaitra legacy unit (disabled)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo "ERROR: deploy/spaitra.service is deprecated. Use deploy/spaitra-core.service with deploy/install.sh." >&2; exit 1'
+
+[Install]
+WantedBy=multi-user.target

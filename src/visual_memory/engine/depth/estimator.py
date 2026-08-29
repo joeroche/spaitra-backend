@@ -1,0 +1,128 @@
+"""
+Depth estimation and spatial narration for scan mode.
+
+All spatial logic lives here.
+Instantiate once per process via model_registry.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import os
+from pathlib import Path
+
+import torch
+import depth_pro
+from depth_pro.depth_pro import DEFAULT_MONODEPTH_CONFIG_DICT
+from PIL import Image
+
+# Absolute default checkpoint path; can be overridden via DEPTH_CHECKPOINT_PATH.
+_DEFAULT_CHECKPOINT_PATH = Path(__file__).resolve().parents[4] / "checkpoints" / "depth_pro.pt"
+
+
+def _checkpoint_path() -> Path:
+    override = os.environ.get("DEPTH_CHECKPOINT_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _DEFAULT_CHECKPOINT_PATH
+
+CONFIDENCE_HIGH = 0.6
+
+
+def _vertical_zone(bbox: list, img_h: int) -> str:
+    """Classify vertical gaze zone from bbox position in frame.
+
+    Returns 'down', 'up', or 'level'.
+    Used to prepend a gaze instruction to narration so the user doesn't
+    interpret slant-distance as a walk-forward distance.
+    """
+    cy = (bbox[1] + bbox[3]) / 2
+    ny = cy / img_h  # 0 = top of frame, 1 = bottom
+    if ny > 0.60:
+        return "down"
+    if ny < 0.25:
+        return "up"
+    return "level"
+
+
+class DepthEstimator:
+
+    def __init__(self):
+        # Auto-detect device: CUDA > MPS > CPU.
+        # depth_pro.create_model_and_transforms defaults to CPU if not passed explicitly,
+        # which causes 10-30x slowdown vs GPU. Always pass device explicitly.
+        from visual_memory.utils.device_utils import get_device
+        self.device = torch.device(get_device())
+
+        config = dataclasses.replace(DEFAULT_MONODEPTH_CONFIG_DICT, checkpoint_uri=str(_checkpoint_path()))
+        self.model, self.transform = depth_pro.create_model_and_transforms(config=config, device=self.device)
+        self.model.eval()
+
+    def to_cpu(self) -> None:
+        """Move Depth Pro weights to CPU RAM. Frees ~2 GB VRAM; call before remember pipeline."""
+        if self.device != torch.device("cpu"):
+            self.model.to("cpu")
+            self.device = torch.device("cpu")
+
+    def to_gpu(self) -> None:
+        """Restore Depth Pro weights to GPU. Call before scan pipeline (when enable_depth)."""
+        from visual_memory.utils.device_utils import get_device
+        target = torch.device(get_device())
+        if self.device != target:
+            self.model.to(target)
+            self.device = target
+
+    def estimate(self, image: Image.Image, focal_length_px: float = None) -> torch.Tensor:
+        # focal_length_px from Android: (focalLengthMm / sensorWidthMm) * imageWidthPx
+        # None = Depth Pro infers (~75% error vs ~26% calibrated at close range per our testing)
+        # Call once per query image; reuse depth_map for all matched objects
+        # depth_pro.load_rgb expects a file path, so we use transform directly on the PIL image
+        image_tensor = self.transform(image).to(self.device)
+        f_px = torch.tensor(focal_length_px, dtype=torch.float32).to(self.device) if focal_length_px else None
+        with torch.no_grad():
+            prediction = self.model.infer(image_tensor, f_px=f_px)
+        return prediction["depth"]  # (H, W) metric meters
+
+    def get_depth_at_bbox(self, depth_map: torch.Tensor, bbox: list) -> float:
+        # Inner 50% of bbox reduces background bleed at object edges
+        x1, y1, x2, y2 = [int(c) for c in bbox]
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        hw, hh = (x2 - x1) // 4, (y2 - y1) // 4
+        region = depth_map[max(cy-hh,0):min(cy+hh, depth_map.shape[0]),
+                           max(cx-hw,0):min(cx+hw, depth_map.shape[1])]
+        if region.numel() == 0:
+            return 0.0
+        return region.mean().item() * 3.28084  # meters -> feet
+
+    # Previously used 12-hour clock position (e.g. "3 o'clock"); switched to plain
+    # directions to remove mental translation step for blind users. Could revert if
+    # finer granularity is needed, but 5 zones map directly to body movement.
+    def get_direction(self, bbox: list, img_w: int) -> str:
+        cx = (bbox[0] + bbox[2]) / 2
+        nx = (cx / img_w) * 2 - 1  # -1=far left, 1=far right
+
+        if nx < -0.5:  return "to your left"
+        if nx < -0.15: return "slightly left"
+        if nx < 0.15:  return "ahead"
+        if nx < 0.5:   return "slightly right"
+        return                "to your right"
+
+    def build_narration(
+        self,
+        label: str,
+        direction: str,
+        distance_ft: float,
+        similarity: float,
+        bbox: list | None = None,
+        img_h: int | None = None,
+    ) -> str | None:
+        if similarity < CONFIDENCE_HIGH:
+            return f"May be a {label} {direction}, focus to verify."
+
+        vertical = _vertical_zone(bbox, img_h) if (bbox is not None and img_h is not None) else "level"
+
+        if vertical == "down":
+            return f"{label.capitalize()} look down, {direction}, {distance_ft:.1f} feet away."
+        if vertical == "up":
+            return f"{label.capitalize()} look up, {direction}, {distance_ft:.1f} feet away."
+        return f"{label.capitalize()} {direction}, {distance_ft:.1f} feet away."

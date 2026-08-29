@@ -1,0 +1,125 @@
+"""
+YOLOE object detection module.
+
+This module wraps the prompt-free YOLOE detector used by ScanPipeline.
+Prompt-based detection is handled by GroundingDINO in prompt_based.py.
+"""
+from __future__ import annotations
+
+from typing import Optional, Tuple, List, Union
+from pathlib import Path
+from ultralytics import YOLOE
+from PIL import Image
+
+from visual_memory.config import Settings
+
+# Resolved once at import time; always points to the .pt next to this file,
+# regardless of the working directory the process was started from.
+_DEFAULT_MODEL = str(Path(__file__).parent / "yoloe-26l-seg-pf.pt")
+_defaults = Settings()
+
+
+class YoloeDetector:
+    """
+    YOLOE detector with fixed semantics:
+    - prompt-free model: ALL detections with set confidence & iou (intersection) thresholds,
+      not very accurate class labels; breadth>accuracy of detections for similarity
+      algorithm to handle in depth since its quite fast
+    """
+
+    def __init__(
+        self,
+        prompt_free_model_path: str = _DEFAULT_MODEL,
+        confidence_threshold: float = _defaults.yoloe_confidence,
+        intersection_threshold: float = _defaults.yoloe_iou
+    ) -> None:
+        """
+        Args:
+            prompt_free_model_path: Path to the prompt-free YOLOE model
+            confidence_threshold: Minimum confidence score for detections (0-1)
+            intersection_threshold: IoU (Intersection over Union) threshold (0-1)
+        """
+        model_path = Path(prompt_free_model_path)
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Model file not found: {prompt_free_model_path}\n"
+                f"Please ensure the model file is in the correct location."
+            )
+        
+        # ultralytics auto-selects device: CUDA > MPS > CPU. No explicit device arg needed.
+        self.prompt_free_model = YOLOE(prompt_free_model_path)
+        self.confidence_threshold = confidence_threshold
+        self.intersection_threshold = intersection_threshold
+
+    def to_cpu(self) -> None:
+        """Move YOLOE weights to CPU RAM. Frees GPU VRAM; call before remember pipeline."""
+        self.prompt_free_model.to("cpu")
+
+    def to_gpu(self) -> None:
+        """Restore YOLOE weights to GPU. Call before scan pipeline."""
+        from visual_memory.utils.device_utils import get_device
+        self.prompt_free_model.to(get_device())
+
+    def detect_all(self, image: Union[str, Image.Image]) -> Tuple[Optional[List[List[float]]], Optional[List[float]]]:
+        """
+        Prompt-free detection: return ALL boxes.
+
+        Args:
+            image: File path string OR PIL Image object.
+                   ultralytics predict() accepts both natively.
+
+        Returns:
+            Tuple of (boxes, scores) where:
+                - boxes: List of bounding boxes as [x1, y1, x2, y2]
+                - scores: List of confidence scores
+            Returns (None, None) if no detections found
+
+        Raises:
+            FileNotFoundError: If a path string is given and the file doesn't exist
+        """
+        if isinstance(image, str):
+            img_path = Path(image)
+            if not img_path.exists():
+                raise FileNotFoundError(f"Image file not found: {image}")
+        
+        try:
+            results = self.prompt_free_model.predict(
+                image,
+                verbose=False,
+                conf=self.confidence_threshold,
+                iou=self.intersection_threshold
+            )
+        except Exception as e:
+            raise RuntimeError(f"Error during YOLOE detection: {str(e)}") from e
+
+        if len(results[0].boxes) == 0:
+            return None, None
+
+        boxes = results[0].boxes.xyxy.tolist()
+        scores = results[0].boxes.conf.tolist()
+
+        return boxes, scores
+
+    def detect_all_batch(
+        self,
+        images: List[Union[str, Image.Image]],
+    ) -> List[Tuple[Optional[List[List[float]]], Optional[List[float]]]]:
+        """
+        Run prompt-free detection on a batch of images in a single forward pass.
+
+        Returns List of (boxes, scores) tuples aligned with input images.
+        Preferred over calling detect_all() in a loop on CUDA - single model forward pass.
+        """
+        results = self.prompt_free_model.predict(
+            images,
+            verbose=False,
+            conf=self.confidence_threshold,
+            iou=self.intersection_threshold,
+        )
+        output = []
+        for r in results:
+            if len(r.boxes) == 0:
+                output.append((None, None))
+            else:
+                output.append((r.boxes.xyxy.tolist(), r.boxes.conf.tolist()))
+        return output

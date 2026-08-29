@@ -1,0 +1,287 @@
+"""POST /ask; open-ended natural language memory search.
+
+The user asks anything about their stored world in plain speech.
+Backend parses intent (via Ollama when available), runs semantic search
+over labels and OCR text, and returns a narration string ready to speak.
+"""
+from flask import Blueprint, request, jsonify
+
+from visual_memory.api.pipelines import get_database, get_settings
+from visual_memory.api.routes.find import (
+    _fuzzy_label_match_scored,
+    _ocr_content_match_scored,
+    _format_sighting,
+    build_narration,
+    is_document_query,
+)
+from visual_memory.utils.ollama_utils import extract_search_term, is_unsafe_query, run_ask_agent
+from visual_memory.utils import get_logger
+from visual_memory.utils.voice_state_context import build_state_contract
+from ._json_utils import read_json_dict
+
+_log = get_logger(__name__)
+
+ask_bp = Blueprint("ask", __name__)
+
+_AMBIGUITY_DELTA = 0.03
+
+
+def _tokens(text: str) -> set[str]:
+    return {tok for tok in (text or "").lower().replace("_", " ").split() if tok}
+
+
+def _has_disambiguating_tokens(query: str, labels: list[str]) -> bool:
+    q_tokens = _tokens(query)
+    if not q_tokens or len(labels) < 2:
+        return False
+    label_token_sets = [_tokens(lbl) for lbl in labels]
+    for i, left in enumerate(label_token_sets):
+        for j, right in enumerate(label_token_sets):
+            if i >= j:
+                continue
+            left_unique = left - right
+            right_unique = right - left
+            if (left_unique & q_tokens) or (right_unique & q_tokens):
+                return True
+    return False
+
+
+def _is_ambiguous_top_match(scored: list[tuple[str, float]], query: str) -> bool:
+    if len(scored) < 2:
+        return False
+    top_label, top_score = scored[0]
+    second_label, second_score = scored[1]
+    if top_label == second_label:
+        return False
+    if (top_score - second_score) > _AMBIGUITY_DELTA:
+        return False
+    return not _has_disambiguating_tokens(query, [top_label, second_label])
+
+
+def _disambiguation_narration(labels: list[str]) -> str:
+    choices = " or ".join(labels[:2])
+    return f"I found close matches. Did you mean {choices}?"
+
+
+def process_ask_query(raw_query, state_context: dict | None = None) -> tuple[dict, int]:
+    if raw_query is None:
+        return {"error": "missing field: query"}, 400
+    if not isinstance(raw_query, str):
+        return {"error": "query must be a string"}, 400
+    query = raw_query.strip()
+    if not query:
+        return {"error": "missing field: query"}, 400
+
+    if is_unsafe_query(query):
+        _log.warning({
+            "event": "ask_blocked_unsafe_query",
+            "query": query,
+        })
+        return {
+            "query": query,
+            "search_term": None,
+            "ollama_used": False,
+            "found": False,
+            "blocked": True,
+            "reason": "unsafe_query",
+            "narration": "I can only help with memory-related object lookup requests.",
+        }, 400
+
+    settings = get_settings()
+    db = get_database()
+
+    if settings.llm_agent_enabled:
+        agent_result = run_ask_agent(query, db, state_context=state_context)
+        if agent_result is not None:
+            narration, agent_meta = agent_result
+            _log.info({"event": "ask_agent_hit", "query": query, **agent_meta})
+            return {
+                "query": query,
+                "found": True,
+                "agent": True,
+                "narration": narration,
+                "strategies_tried": ["agent"],
+            }, 200
+
+    rows = None
+    matched_label: str | None = None
+    matched_by: str | None = None
+    ollama_used = False
+    search_term = query
+    strategies_tried: list[str] = []
+
+    # Step 1: LLM query extraction as preprocessing (when enabled)
+    if settings.llm_query_fallback_enabled:
+        extracted = extract_search_term(
+            query,
+            known_labels=db.get_known_labels(),
+            state_context=state_context,
+        )
+        if extracted:
+            search_term = extracted
+            strategies_tried.append("llm_extraction")
+            if extracted.lower() != query.lower():
+                ollama_used = True
+
+    # Step 2: exact label match on preprocessed term
+    rows = db.get_sightings(label=search_term, limit=1)
+    strategies_tried.append("exact")
+    if rows:
+        matched_label = search_term
+        matched_by = "exact"
+
+    _log.info({
+        "event": "ask_search",
+        "query": query,
+        "search_term": search_term,
+        "ollama_used": ollama_used,
+        "strategies_tried": strategies_tried,
+    })
+
+    # Step 3: complexity classification and primary strategy
+    document_query = is_document_query(query) or is_document_query(search_term)
+    primary_strategy = "document_semantic" if document_query else "fuzzy_label"
+    fallback_strategy = "fuzzy_label" if document_query else "document_semantic"
+
+    if not rows:
+        if primary_strategy == "document_semantic":
+            ocr_scored = _ocr_content_match_scored(search_term, settings.text_similarity_threshold)
+            strategies_tried.append("document_semantic")
+            if ocr_scored:
+                if _is_ambiguous_top_match(ocr_scored, search_term):
+                    return {
+                        "query": query,
+                        "search_term": search_term,
+                        "ollama_used": ollama_used,
+                        "found": False,
+                        "document_query": document_query,
+                        "strategies_tried": strategies_tried,
+                        "candidates": [lbl for lbl, _ in ocr_scored[:2]],
+                        "reason": "ambiguous_match",
+                        "narration": _disambiguation_narration([lbl for lbl, _ in ocr_scored[:2]]),
+                    }, 200
+                matched_label = ocr_scored[0][0]
+                matched_by = "document_semantic"
+                rows = db.get_sightings(label=matched_label, limit=1)
+        else:
+            scored = _fuzzy_label_match_scored(search_term, settings.text_similarity_threshold)
+            strategies_tried.append("fuzzy_label")
+            if scored:
+                if _is_ambiguous_top_match(scored, search_term):
+                    return {
+                        "query": query,
+                        "search_term": search_term,
+                        "ollama_used": ollama_used,
+                        "found": False,
+                        "document_query": document_query,
+                        "strategies_tried": strategies_tried,
+                        "candidates": [lbl for lbl, _ in scored[:2]],
+                        "reason": "ambiguous_match",
+                        "narration": _disambiguation_narration([lbl for lbl, _ in scored[:2]]),
+                    }, 200
+                matched_label = scored[0][0]
+                matched_by = "fuzzy_label"
+                rows = db.get_sightings(label=matched_label, limit=1)
+
+    # Step 4: cross-strategy fallback
+    if not rows:
+        if fallback_strategy == "document_semantic":
+            ocr_scored = _ocr_content_match_scored(search_term, settings.text_similarity_threshold)
+            strategies_tried.append("document_semantic")
+            if ocr_scored:
+                if _is_ambiguous_top_match(ocr_scored, search_term):
+                    return {
+                        "query": query,
+                        "search_term": search_term,
+                        "ollama_used": ollama_used,
+                        "found": False,
+                        "document_query": document_query,
+                        "strategies_tried": strategies_tried,
+                        "candidates": [lbl for lbl, _ in ocr_scored[:2]],
+                        "reason": "ambiguous_match",
+                        "narration": _disambiguation_narration([lbl for lbl, _ in ocr_scored[:2]]),
+                    }, 200
+                matched_label = ocr_scored[0][0]
+                matched_by = "document_semantic_fallback"
+                rows = db.get_sightings(label=matched_label, limit=1)
+        else:
+            scored = _fuzzy_label_match_scored(search_term, settings.text_similarity_threshold)
+            strategies_tried.append("fuzzy_label")
+            if scored:
+                if _is_ambiguous_top_match(scored, search_term):
+                    return {
+                        "query": query,
+                        "search_term": search_term,
+                        "ollama_used": ollama_used,
+                        "found": False,
+                        "document_query": document_query,
+                        "strategies_tried": strategies_tried,
+                        "candidates": [lbl for lbl, _ in scored[:2]],
+                        "reason": "ambiguous_match",
+                        "narration": _disambiguation_narration([lbl for lbl, _ in scored[:2]]),
+                    }, 200
+                matched_label = scored[0][0]
+                matched_by = "fuzzy_label_fallback"
+                rows = db.get_sightings(label=matched_label, limit=1)
+
+    if not rows or matched_label is None:
+        _log.info({
+            "event": "ask_search_miss",
+            "query": query,
+            "search_term": search_term,
+            "document_query": document_query,
+            "primary_strategy": primary_strategy,
+            "strategies_tried": strategies_tried,
+        })
+        return {
+            "query": query,
+            "search_term": search_term,
+            "ollama_used": ollama_used,
+            "found": False,
+            "strategies_tried": strategies_tried,
+            "narration": "I couldn't find anything matching that in your memory.",
+        }, 200
+
+    sightings = [_format_sighting(r) for r in rows]
+    narration = build_narration(matched_label, sightings[0])
+    _log.info({
+        "event": "ask_search_hit",
+        "query": query,
+        "search_term": search_term,
+        "document_query": document_query,
+        "matched_label": matched_label,
+        "matched_by": matched_by,
+        "strategies_tried": strategies_tried,
+    })
+
+    return {
+        "query": query,
+        "search_term": search_term,
+        "ollama_used": ollama_used,
+        "found": True,
+        "document_query": document_query,
+        "matched_label": matched_label,
+        "matched_by": matched_by,
+        "strategies_tried": strategies_tried,
+        "narration": narration,
+        "last_sighting": sightings[0],
+        "sightings": sightings,
+    }, 200
+
+
+@ask_bp.post("/ask")
+def ask():
+    data, err = read_json_dict(request)
+    if err is not None:
+        body, status = err
+        return jsonify(body), status
+    state = data.get("state") if isinstance(data.get("state"), dict) else {}
+    mode = data.get("current_mode") or data.get("mode")
+    if not mode and isinstance(state, dict):
+        mode = state.get("current_mode") or state.get("mode")
+    context = data.get("context")
+    if not isinstance(context, dict) and isinstance(state, dict):
+        context = state.get("context")
+    state_contract = build_state_contract(mode=mode, context=context)
+    result, status = process_ask_query(data.get("query"), state_context=state_contract)
+    return jsonify(result), status

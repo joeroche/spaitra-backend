@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONF="${CONF:-/etc/supervisor/spaitra-supervisord.conf}"
+SERVICES=(spaitra-sshd ollama spaitra-ocr spaitra-core spaitra-tunnel)
+
+usage() {
+  cat <<'EOF'
+Usage: deploy/runpod/spaitra-ctl <status|start|stop|restart|logs|reread> [service]
+EOF
+}
+
+svc="${2:-all}"
+
+resolve_services() {
+  if [[ "$svc" == "all" ]]; then
+    printf '%s\n' "${SERVICES[@]}"
+  else
+    printf '%s\n' "$svc"
+  fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  status)
+    supervisorctl -c "$CONF" status
+    ;;
+  start|stop|restart)
+    while IFS= read -r name; do
+      supervisorctl -c "$CONF" "$cmd" "$name"
+    done < <(resolve_services)
+    ;;
+  logs)
+    name="${svc:-spaitra-core}"
+    tail -n 200 -f "/opt/spaitra/logs/supervisor/${name}.log"
+    ;;
+  reread)
+    supervisorctl -c "$CONF" reread
+    supervisorctl -c "$CONF" update
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

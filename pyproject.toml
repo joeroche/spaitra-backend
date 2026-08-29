@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visual-memory"
+version = "0.1.0"
+description = "Visual memory system with object detection for TSA Software Development app"
+requires-python = ">=3.8"
+dependencies = [
+    # Shared package deps
+    "numpy>=1.24.0",
+    "pillow>=9.0.0",
+    "pillow-heif>=0.10.0",
+]
+
+[project.optional-dependencies]
+core = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.56.0",
+    "huggingface_hub>=0.26.0",
+    "ultralytics>=8.0.0",
+    "einops",
+    "addict",
+    "easydict",
+    "depth-pro @ git+https://github.com/apple/ml-depth-pro.git",
+    "flask>=3.0.0",
+    "flask-socketio>=5.3.0",
+    "python-socketio[client]>=5.3.0",
+    "gevent>=23.0.0",
+    "gevent-websocket>=0.10.1",
+    "gunicorn>=21.0.0",
+    "pysqlcipher3>=1.2.0; python_version < '3.13'",
+    "ollama>=0.3.0",
+    "loguru>=0.7.0",
+    "psutil>=5.9.0",
+    "moondream==0.2.0",
+    "lightglue @ git+https://github.com/cvg/LightGlue.git",
+]
+ocr = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "paddleocr>=2.8.0",
+    "paddlepaddle>=3.0.0",
+]
+
+[project.scripts]
+remember-mode = "visual_memory.pipelines.remember_mode.main:main"
+scan-mode = "visual_memory.pipelines.scan_mode.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
