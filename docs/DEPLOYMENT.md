@@ -93,7 +93,7 @@ Before treating a deployment as ready, verify:
 Model-backed tests, live audio checks, and benchmarks run on the active GPU
 server. Do not substitute the retired legacy server without explicit approval.
 
-## Security and publication boundaries
+## Security and data boundaries
 
 - Supply API keys, encryption keys, Hugging Face tokens, and SSH credentials at
   runtime; never commit them.
@@ -108,6 +108,5 @@ server. Do not substitute the retired legacy server without explicit approval.
 ## Legacy compatibility
 
 Some top-level service and cutover helpers remain for compatibility with older
-deployments. They are not the recommended container path. The duplicated legacy
-archive and public server-access notes were removed from the portfolio surface;
-Git history remains available if forensic comparison is required.
+deployments. They are not the recommended container path; use the supervised
+container flow above for current deployments.

@@ -1,16 +1,15 @@
 # Accuracy Tuning
 
 This document records the project-level tuning process for scan/retrieval
-accuracy. It is the committed overview; local agent plans may contain more
-detailed runbooks.
+accuracy.
 
 ## Current State
 
 The current scan stack uses YOLOE proposals, DINOv3 image embeddings, CLIP text
 embeddings for OCR, a combined 1536-dimensional vector, optional ProjectionHead
 personalization, deduplication, and confidence-proportional OCR text weighting.
-The nonzero top-1/top-2 margin gate is disabled; the margin remains available as
-evidence.
+The configurable top-1/top-2 margin gate is zero by default; the margin remains
+available in traces for tuning.
 
 The benchmark dataset is a 120-image instance-level set with 10 labels across
 distance, lighting, and background conditions. Its accuracy-hardening split is
@@ -18,8 +17,8 @@ fixed at seed 42 with 60 training and 60 test images, six of each per label.
 Both partitions contain mixed capture conditions; this is not a
 distance-held-out split.
 
-A full-stack frozen run and repeat comparison were recorded in May 2026. The
-private archived artifacts reported:
+A full-stack run and repeat comparison were recorded in May 2026. That run
+reported:
 - `top_3_recall=0.55`
 - `top_5_recall=0.65`
 - `top_10_recall=1.00`
@@ -28,23 +27,14 @@ private archived artifacts reported:
 - `correct_accept_rate=0.30`
 - `abstention_rate=0.00`
 
-These numbers are historical, not a claim about the current portfolio branch.
-The on-demand endpoint later became unavailable, so final public performance
-numbers require a fresh server rerun with the code SHA, settings, hardware,
-command, split, and artifact paths recorded together.
+These numbers describe that historical run, not the current code. The on-demand
+endpoint later became unavailable, so any new performance report requires a
+fresh server run with the code SHA, settings, hardware, command, split, and
+artifact paths recorded together.
 
 The historical interpretation was that retrieval coverage was strong
-(`top_10_recall=1.00`) while decision-policy precision was weak. That evidence
-supports decision and verifier work before replacement of the retrieval stack.
-
-Local ignored references, when present:
-- `ACCURACY_HARDENING_PLAN.log` - execution plan for the hardening branches.
-- `ML_TUNING_REFERENCE.log` - required tuning-methodology reference for agents.
-
-Decision-making agents and sub-agents must read both local references before
-acting on accuracy, retrieval, OCR/text evidence, verifiers, benchmarks, tests,
-reports, docs, or implementation approach. Only fully specified mechanical
-micro-tasks are exempt.
+(`top_10_recall=1.00`) while decision-policy precision was weak. That result
+points to decision and verifier work before replacement of the retrieval stack.
 
 ## Tuning Goal
 
