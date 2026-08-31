@@ -210,10 +210,9 @@ with runtime details in [Deployment](docs/DEPLOYMENT.md).
 - Similar personal items remain difficult at distance, under blur, or when
   discriminating text is unreadable.
 - Historical evaluation exposed weak final acceptance precision despite
-  stronger candidate retrieval; decision-policy and verifier work remains.
+  strong candidate retrieval due to false positives; larger models are needed for real-life reliability.
 - Full execution depends on gated checkpoints and a GPU-capable environment.
-- This repository does not yet declare a source-code license. Third-party model
-  terms are tracked in [LICENSES.md](docs/LICENSES.md).
+- This repository cannot be used commercially; Third-party model terms are tracked in [LICENSES.md](docs/LICENSES.md).
 
 ## Project history
 
