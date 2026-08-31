@@ -17,7 +17,30 @@ shared team work.
 
 ## From detection to personal memory
 
-![Spaitra pipeline: detections become multimodal representations, are matched against personal memories, and produce spatial voice results](media/pipeline/personal-memory-pipeline.svg)
+```text
+TEACH
+label + image
+  -> Grounding DINO crop
+  -> DINOv3 visual embedding (1,024-d)
+  -> [when text-like] PaddleOCR -> confidence-weighted CLIP text (512-d)
+  -> normalized 1,536-d representation
+  -> SQLite memory (up to 3 prototypes per label)
+
+SCAN
+scene -> YOLOE candidate regions
+      -> for each crop: the same visual + optional text representation
+      -> [when trained] apply the same projection to query + prototypes
+      -> cosine retrieval by label
+      -> label threshold + optional top-1/top-2 margin
+      -> accept or reject
+      -> sighting -> deduplicate + spatial order -> [Depth Pro] -> narration
+
+FEEDBACK
+correct / wrong result
+  -> retain the raw query-memory pair
+  -> triplets + hard-negative mining
+  -> residual projection head applied at matching time
+```
 
 YOLOE only proposes candidate regions. For every crop, Spaitra computes a
 1,024-dimensional DINOv3 visual embedding and conditionally adds a
@@ -42,6 +65,49 @@ sightings for later queries.
 Teach is prompt-guided because the user supplies a label. Scan starts without
 knowing which remembered objects may be present, so it generates broad
 proposals and lets the user's memory index determine which regions matter.
+
+## From speech to action
+
+```text
+encoded microphone audio
+  -> ffmpeg decode -> mono float32 PCM at 16 kHz
+  -> reject undecodable, shorter-than-0.20 s, or near-silent input
+  -> state-aware Whisper prompt
+       known labels + recent rooms + vocabulary for the current mode
+  -> Whisper transcript
+  -> deterministic session and command routing
+  -> [only when interpretation is needed] Ollama
+       canonical search term / focused-item intent / bounded memory tools
+  -> exact label, lexical near-match, CLIP label match, or OCR semantic match
+  -> ambiguity check
+  -> camera, sighting, OCR, VQA, or settings action
+  -> Socket.IO result + session state + narration
+```
+
+Whisper is part of the interaction pipeline, not a standalone transcription
+endpoint bolted onto it. Before decoding, ffmpeg normalizes supported input
+formats to the model's 16 kHz mono waveform. The backend builds a bounded
+Whisper context prompt from the current session state: idle mode can include
+taught labels, recent rooms, and commands such as *scan* or *find*; a pending
+confirmation instead emphasizes terms such as *yes*, *no*, *correct*, and
+*wrong*. The transcript then enters a Socket.IO state machine that can request
+an image or location, focus interaction on one item, or dispatch an action.
+
+Ollama is an intermediary language layer, not the visual matcher. Common
+commands and obvious focused-item requests are routed deterministically first.
+When wording is less direct, the local model can reduce a phrase to a known
+item name, classify a focused-item request, or run a bounded Ask tool loop over
+items, sightings, OCR, and descriptions. If Ollama is unavailable or its output
+is unusable, the routes continue through deterministic fallbacks.
+
+Name resolution is deliberately layered. It first normalizes labels and checks
+exact and substring matches, then permits a Levenshtein distance of at most two
+when the label lengths also differ by at most two characters. Depending on the
+route, CLIP text similarity can compare the query with stored label embeddings,
+and OCR semantic similarity can search embeddings of remembered document text.
+Ask refuses to silently choose when its top two different labels are within
+0.03 similarity and the transcript does not contain words that distinguish
+them; it asks the user to clarify instead.
 
 ## Personalization without rewriting memory
 
@@ -154,6 +220,9 @@ optimization pass was not completed. See the
 - [Voice session](src/visual_memory/api/voice_session.py) and
   [Socket.IO routes](src/visual_memory/api/routes/voice_ws.py) — backend-owned
   real-time interaction state.
+- [Whisper recognizer](src/visual_memory/engine/speech_recognition/whisper_recognizer.py)
+  and [language utilities](src/visual_memory/utils/ollama_utils.py) — state-aware
+  transcription context, item-name resolution, and bounded tool interpretation.
 - [Full benchmark](src/visual_memory/benchmarks/full_benchmark.py) — fixed
   splits, retrieval traces, operating points, failure analysis, and latency.
 - [Architecture](docs/ARCHITECTURE.md) — runtime boundaries, model lifecycle,
