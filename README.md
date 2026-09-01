@@ -276,13 +276,13 @@ with runtime details in [Deployment](docs/DEPLOYMENT.md).
 
 ## Limitations
 
-- Similar personal items remain difficult at distance, under blur, or when
-  discriminating text is unreadable.
+- Semantically similar items remain difficult at distance, under blur, or when
+  discriminating text is unreadable. This can be improved with a larger model
+  or a LightGlue implementation, but we were limited by inference budget.
 - Historical evaluation put the correct label among the top-10 candidates for
-  every test query, but final acceptance precision remained weak;
-  decision-policy and verifier work remains.
+  every test query, but final acceptance precision was subpar due to high FP.
 - Full execution depends on gated checkpoints and a GPU-capable environment.
-- The repository has no source-code license, and its model stack includes
+- The repository has no source-code license, and its model stack includes`
   component-specific terms tracked in [LICENSES.md](docs/LICENSES.md).
 
 ## Project history
