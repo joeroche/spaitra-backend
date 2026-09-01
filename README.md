@@ -54,7 +54,7 @@ work.
   - A residual projection head adapts matching without overwriting the original
     embeddings in SQLite.
 
-## Real Pipeline Evidence
+## Pipeline Visualization
 
 ![YOLOE candidate regions in a multi-object desk scene](media/pipeline/scan-result-cropped.jpg)
 
