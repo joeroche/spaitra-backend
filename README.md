@@ -278,11 +278,12 @@ with runtime details in [Deployment](docs/DEPLOYMENT.md).
 
 - Similar personal items remain difficult at distance, under blur, or when
   discriminating text is unreadable.
-- Historical evaluation exposed weak final acceptance precision despite
-  stronger candidate retrieval; decision-policy and verifier work remains.
+- Historical evaluation put the correct label among the top-10 candidates for
+  every test query, but final acceptance precision remained weak;
+  decision-policy and verifier work remains.
 - Full execution depends on gated checkpoints and a GPU-capable environment.
-- This repository does not yet declare a source-code license. Third-party model
-  terms are tracked in [LICENSES.md](docs/LICENSES.md).
+- The repository has no source-code license, and its model stack includes
+  component-specific terms tracked in [LICENSES.md](docs/LICENSES.md).
 
 ## Project history
 
