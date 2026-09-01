@@ -1,108 +1,161 @@
-# Accuracy Tuning
+# Tuning the Personal-Object Matcher
 
-This document records the project-level tuning process for scan/retrieval
-accuracy.
+Spaitra is an advanced multimodal ML pipeline built under a practical inference
+budget. Its tuning work focused on making personal-object retrieval more useful
+without turning every camera frame into an unbounded cascade of large models.
 
-## Current State
+This document records how the matcher reached its current design, what the
+historical evaluation revealed, and which methods could improve it further.
 
-The current scan stack uses YOLOE proposals, DINOv3 image embeddings, CLIP text
-embeddings for OCR, a combined 1536-dimensional vector, optional ProjectionHead
-personalization, deduplication, and confidence-proportional OCR text weighting.
-The configurable top-1/top-2 margin gate is zero by default; the margin remains
-available in traces for tuning.
+## How the Matcher Evolved
 
-The benchmark dataset is a 120-image instance-level set with 10 labels across
-distance, lighting, and background conditions. Its accuracy-hardening split is
-fixed at seed 42 with 60 training and 60 test images, six of each per label.
-Both partitions contain mixed capture conditions; this is not a
-distance-held-out split.
+### 1. Visual instance retrieval
 
-A full-stack run and repeat comparison were recorded in May 2026. That run
-reported:
-- `top_3_recall=0.55`
-- `top_5_recall=0.65`
-- `top_10_recall=1.00`
-- `accepted_precision=0.30`
-- `accepted_match_rate=1.00`
-- `correct_accept_rate=0.30`
-- `abstention_rate=0.00`
+The first matching path used a detector crop and a visual embedding to compare
+a scene region with stored object examples. DINOv3 became the visual backbone
+because the task is instance retrieval: separating one wallet, receipt, bottle,
+or key set from visually related objects.
 
-These numbers describe that historical run, not the current code. The on-demand
-endpoint later became unavailable, so any new performance report requires a
-fresh server run with the code SHA, settings, hardware, command, split, and
-artifact paths recorded together.
+### 2. OCR-aware multimodal memories
 
-The historical interpretation was that retrieval coverage was strong
-(`top_10_recall=1.00`) while decision-policy precision was weak. That result
-points to decision and verifier work before replacement of the retrieval stack.
+Visual appearance alone was not enough for receipts, labels, and similar
+containers. PaddleOCR and a CLIP text encoder added a second evidence channel:
 
-## Tuning Goal
+- DINOv3 supplies a 1,024-dimensional visual slot.
+- CLIP supplies a 512-dimensional text slot when OCR finds useful text.
+- Both slots are normalized before the final 1,536-dimensional representation
+  is normalized again.
+- OCR confidence scales the text contribution so weak text cannot dominate a
+  strong visual match.
 
-Optimize for high useful recognition under explicit false-positive budgets.
-False positives matter because the app speaks object identity to blind users,
-but a system that avoids mistakes by rejecting most matches is also not useful.
-Near-identical items such as similar wallets, same-brand bottles, or receipts
-with similar OCR are expected hard cases. They should be measured, reduced, and
-surfaced as uncertainty where appropriate, not used as a reason to drive recall
-or accepted-match rate toward zero.
+### 3. Feedback-based metric adaptation
 
-## Required Metrics
+User corrections were connected to the exact query and memory embeddings that
+produced a scan result. Correct and incorrect relationships became triplets for
+a small residual projection head:
 
-Every matching or decision-policy run should report:
+- it begins as an identity transform;
+- hard-negative mining selects the closest confusing negative;
+- recent feedback can receive more training weight;
+- its influence ramps with the amount of available feedback;
+- raw stored embeddings remain unchanged, so personalization is reversible.
 
-- `top_1_accuracy`
-- `top_3_recall` and `top_10_recall`
-- true-item rank and optional MRR/mAP-style retrieval metrics when top-k traces
-  are available
-- `accepted_precision`
-- `accepted_match_rate`
-- `correct_accept_rate`
-- `holdout_fp_rate`
-- `abstention_rate`
-- per-label and per-condition metrics
-- latency p50/p95 for changed stages
-- calibration metrics such as ECE or Brier score if probability-like confidence
-  is used
-- fixed-FP-budget summaries, for example best useful result at FP budgets 0.05
-  and 0.10
-- precision/recall and risk/coverage operating-point data
+### 4. Measurable retrieval and latency
 
-`accepted_match_rate` is the coverage metric for this project. It must be
-reported beside accepted precision so high-precision, low-coverage runs cannot
-look successful.
+The benchmark grew into a controlled 120-image dataset with fixed splits,
+negative examples, per-stage timing, top-k traces, and failure categories. OCR
+batching and text-likelihood gating reduced unnecessary work, while normalized
+embedding and benchmark-parity checks kept offline evaluation aligned with the
+runtime pipeline.
 
-## Workflow
+### 5. Multiple prototypes and explicit decisions
 
-1. Freeze the dataset split before tuning.
-2. Keep training, calibration, and holdout roles separate.
-3. Sweep thresholds and verifier cutoffs broadly enough to show the operating
-   frontier.
-4. Pick thresholds on training/calibration data or cross-validation.
-5. Report final numbers once on the pinned holdout split.
-6. Compare retrieval, verifier, and decision-policy bottlenecks separately.
-7. Keep hard negatives and near-duplicate cases in a separate hard-cases set.
-8. Reject changes that improve false positives only by collapsing coverage.
+Teach can retain several views of one label instead of collapsing every example
+into one average. Retrieval scores stored examples, groups them by label, and
+then applies a label-aware decision policy.
 
-Reports should use specific failure labels instead of treating every mistake as
-the same kind of false positive. At minimum, distinguish retrieval misses,
-threshold false rejects, near-duplicate confusion, OCR collision or disagreement,
-bad crops, lighting or distance failures, verifier false accepts/rejects, and
-over-abstention.
+The scan path now exposes three separate stages:
 
-## Controlled degradation tooling
+- **Retrieve:** rank personal memories and retain top-k evidence.
+- **Verify:** preserve a boundary for a future local-feature or patch-level
+  check; the current implementation passes the candidate through unchanged.
+- **Decide:** apply label-aware thresholds and an optional top-1/top-2 margin.
 
-The repository also retains an earlier robustness harness for controlled image
-degradation. `create_degraded.py` can derive blur, JPEG compression, and
-Gaussian-noise variants from the private benchmark images, while
-`degradation_curves.py` groups matching results by degradation level and writes
-curve data and optional SVG figures.
+This separation matters because retrieval and acceptance can fail for different
+reasons.
 
-This tooling is separate from the fixed 60/60 hardening result. The generated
-images and curve outputs are not committed, and no degradation result should be
-claimed until the current code SHA, source split, random seed for noise,
-parameters, and output artifacts are captured together. The default generator
-currently covers blur radii 1-5, JPEG quality 30/50/70/90, and Gaussian noise
-standard deviations 0.01/0.02/0.05/0.10.
+## Current Pipeline
+
+- **Teach representation**
+  - Grounding DINO crop refinement
+  - Image-quality checks
+  - DINOv3 visual embedding
+  - Selective PaddleOCR and CLIP text embedding
+  - Bounded prototype storage in SQLite
+- **Scan representation**
+  - YOLOE candidate proposals
+  - Batched DINOv3 embeddings
+  - Conditional OCR on text-like crops
+  - The same normalized multimodal representation used during Teach
+- **Matching**
+  - Optional projection applied to queries and stored prototypes
+  - Cosine ranking grouped by label
+  - Baseline, personalized, and document threshold settings
+  - Optional margin evidence
+  - Deduplication, direction, depth, sightings, and narration after acceptance
+
+## What the Historical Run Showed
+
+A full-stack run recorded in May 2026 reported:
+
+- top-3 recall: 0.55
+- top-5 recall: 0.65
+- top-10 recall: 1.00
+- accepted precision: 0.30
+- accepted match rate: 1.00
+- abstention rate: 0.00
+
+These are historical results, not current performance claims. The correct label
+appearing in the top ten for every test query showed that the representation
+retained useful retrieval signal. Accepting every query with low precision
+showed that the decision policy did not yet convert that signal into a safe
+operating point.
+
+That diagnosis changed the tuning priority from replacing the entire retrieval
+stack to improving calibration, uncertainty handling, and candidate
+verification.
+
+## Evaluation Strategy
+
+The benchmark reports retrieval and product behavior separately:
+
+- **Retrieval quality**
+  - top-1 accuracy
+  - top-3, top-5, and top-10 recall
+  - true-item rank and ranked-candidate traces
+- **Decision quality**
+  - accepted precision
+  - accepted match rate, which acts as coverage
+  - correct accept rate
+  - holdout false-positive rate
+  - abstention rate
+- **Operating behavior**
+  - per-label and per-condition slices
+  - precision/coverage and risk/coverage frontiers
+  - fixed false-positive budget summaries
+  - latency p50/p95 for changed stages
+  - failure categories such as retrieval miss, bad crop, OCR disagreement,
+    near-duplicate confusion, false reject, and false accept
+
+Precision must be reported with coverage. A matcher that avoids errors only by
+rejecting nearly every query is not useful.
+
+## Hard-Case Workflow
+
+Near-duplicate wallets and receipts are kept as explicit hard cases rather than
+removed from the main evaluation. After a benchmark run:
+
+```bash
+scripts/run_hard_cases.sh
+```
+
+The workflow reads the result and trace artifacts, then writes a focused
+Markdown and JSON report. A different archived run can be inspected with:
+
+```bash
+python scripts/build_hard_cases.py \
+  --artifacts-dir /opt/spaitra/accuracy_hardening_baselines/main/frozen_baseline
+```
+
+The frozen trace does not contain raw OCR text. A `text_signal_failure` label
+therefore means text evidence was enabled but the final match was wrong; it does
+not prove that OCR transcription itself failed.
+
+## Controlled Degradation
+
+The robustness harness derives blur, JPEG compression, and Gaussian-noise
+variants from the private benchmark images. It can produce per-level curve data
+and optional SVG plots without changing the fixed 60/60 evaluation split.
 
 ```bash
 PYTHONPATH=src python3 -m visual_memory.benchmarks.create_degraded \
@@ -115,23 +168,59 @@ PYTHONPATH=src python3 -m visual_memory.benchmarks.degradation_curves \
   --results-csv benchmarks/results.csv
 ```
 
-## Next Validation Gate
+No degradation result should be presented without recording the code SHA,
+source split, noise seed, parameters, and output artifacts together.
 
-- Restore or replace the active GPU benchmark runtime.
-- Rerun the frozen configuration and verify deterministic accuracy metrics.
-- Complete the pending OCR-agreement variant benchmark and hard-case report.
-- Close remaining preprocessing, memory-quality, multi-prototype, and
-  decision-stage parity checks against the frozen reference.
-- Publish a final operating point only after a current full-stack run.
+## Improvements Within the Inference Budget
+
+These methods use evidence the current pipeline already computes:
+
+- calibrate separate baseline, personalized, and document thresholds;
+- choose operating points against explicit false-positive budgets;
+- use the top-1/top-2 margin as uncertainty evidence instead of a blanket hard
+  gate;
+- improve prototype selection and weighting across stored viewpoints;
+- use crop quality, OCR agreement, and retrieval rank in a lightweight decision
+  model;
+- collect targeted feedback from near-duplicate and low-margin cases.
+
+They are the most practical next steps because they can improve the decision
+layer without loading another large model for every candidate.
+
+## Improvements With More Compute
+
+The current `Verify` stage is intentionally an extension point. With a larger
+inference budget, it could add:
+
+- DINO patch-token comparison for the top few candidates;
+- LightGlue or another local-feature verifier for texture and geometry;
+- a learned reranker over query, prototype, OCR, quality, and margin signals;
+- a larger embedding backbone or a small ensemble for the hardest object pairs.
+
+These methods may improve fine-grained precision, but they also add GPU memory,
+latency, and deployment complexity. The project therefore demonstrates the
+full tuning process—measurement, diagnosis, controlled changes, and explicit
+next experiments—without claiming that every high-cost extension belongs in
+the current runtime.
+
+## Reproducing a New Result
+
+Before publishing new performance numbers:
+
+1. Use the fixed split in `benchmarks/split_manifest.json`.
+2. Record the code SHA, settings, hardware, command, and artifact directory.
+3. Keep threshold selection separate from final holdout reporting.
+4. Run the full stack twice and confirm deterministic accuracy metrics.
+5. Report retrieval, decision, latency, and condition slices together.
+
+The complete dataset and scoring contract are in
+[Benchmark Specification](../benchmarks/BENCHMARK_SPEC.md).
 
 ## Methodology Sources
 
-- scikit-learn threshold tuning: https://scikit-learn.org/stable/modules/classification_threshold.html
-- scikit-learn precision-recall: https://scikit-learn.org/stable/auto_examples/model_selection/plot_precision_recall.html
-- Google ML ROC/AUC guidance: https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc
-- NIST FRVT verification reporting: https://pages.nist.gov/frvt/html/frvt11.html
-- Selective Classification: https://arxiv.org/abs/1705.08500
-- Calibration: https://proceedings.mlr.press/v70/guo17a.html
-- Google DELF retrieval: https://research.google/pubs/large-scale-image-retrieval-with-attentive-deep-local-features/
-- Google Landmarks Dataset v2: https://research.google/pubs/google-landmarks-dataset-v2-a-large-scale-benchmark-for-instance-level-recognition-and-retrieval/
-- Hard negative metric learning: https://arxiv.org/abs/2007.12749
+- [scikit-learn threshold tuning](https://scikit-learn.org/stable/modules/classification_threshold.html)
+- [scikit-learn precision-recall](https://scikit-learn.org/stable/auto_examples/model_selection/plot_precision_recall.html)
+- [Selective Classification](https://arxiv.org/abs/1705.08500)
+- [Calibration](https://proceedings.mlr.press/v70/guo17a.html)
+- [Google DELF retrieval](https://research.google/pubs/large-scale-image-retrieval-with-attentive-deep-local-features/)
+- [Hard-negative metric learning](https://arxiv.org/abs/2007.12749)

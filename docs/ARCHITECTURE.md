@@ -3,7 +3,7 @@
 Spaitra is a voice-first assistive vision backend for teaching, recognizing,
 locating, and asking questions about personal objects. This document describes
 the stable system shape. Benchmark execution details live in
-[Accuracy Tuning](ACCURACY_TUNING.md), and infrastructure setup lives in
+[Matcher Tuning](ACCURACY_TUNING.md), and infrastructure setup lives in
 [Deployment](DEPLOYMENT.md). The exact HTTP, Socket.IO, and state-machine
 boundary with the companion client lives in
 [Backend-Client Protocol](CLIENT_PROTOCOL.md).
@@ -23,29 +23,20 @@ Shared application code is under `src/visual_memory`. The service entrypoints in
 
 ## Request flow
 
-```text
-client
-  |
-  +-- HTTP: remember, scan, find, ask, items, feedback, settings
-  |
-  +-- Socket.IO: voice turns, state, navigation, narration
-             |
-             v
-       API and session state
-             |
-             v
-      remember / scan pipelines
-        |       |       |
-        |       |       +-- depth and direction
-        |       +---------- OCR service and CLIP text features
-        +------------------ detection and DINOv3 visual features
-             |
-             v
-    personal memory + retrieval + feedback
-             |
-             v
-       structured response and narration
-```
+- **Client input**
+  - HTTP carries remember, scan, find, ask, item, feedback, and settings
+    requests.
+  - Socket.IO carries voice turns, session state, navigation, and narration.
+- **API and session layer**
+  - Validates input and preserves the backend-authoritative interaction state.
+  - Routes work into the Remember, Scan, Find, or Ask path.
+- **Inference pipelines**
+  - Detection and DINOv3 provide visual candidates and representations.
+  - The OCR service and CLIP add text evidence when a crop is text-like.
+  - Direction and optional depth add spatial context after matching.
+- **Memory and response**
+  - SQLite supplies personal prototypes, feedback, settings, and sightings.
+  - The backend returns structured results and concise narration.
 
 ## Core workflows
 

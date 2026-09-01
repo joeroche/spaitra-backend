@@ -1,157 +1,136 @@
 # Benchmark Specification
 
+Spaitra's benchmark measures personal-object retrieval and final acceptance
+under controlled changes in distance, lighting, and background. Raw images are
+private; the dataset manifest, fixed split, scoring contract, and evaluation
+code are retained in the repository.
+
 ## Dataset
 
-120 images across 10 object labels, 12 conditions per label.
+- 120 images
+- 10 distinct personal-object labels
+- 12 conditions per label
+  - distances: 1, 3, and 6 feet
+  - lighting: bright and dim
+  - backgrounds: clean and cluttered
 
-### Labels (10)
+The labels include two wallets and two receipts as distinct objects. Confusing
+one wallet or receipt for the other is a false positive, not partial credit.
 
-| Label | Coarse category |
-|---|---|
-| glasses_prescription | personal |
-| keys_house | personal |
-| keys_safe | personal |
-| magnesium_bottle | container |
-| receipt_eye_doctor | paper |
-| receipt_salon | paper |
-| sunglasses_sun | personal |
-| wallet_trifold | personal |
-| wallet_zipper | personal |
-| water_bottle | container |
+Files use this naming convention:
 
-### Condition matrix (12 per label)
+```text
+{label}_{distance}ft_{lighting}_{background}.jpg
+```
 
-Each label is photographed under every combination of:
+## Capture Protocol
 
-- Distance: 1ft, 3ft, 6ft
-- Lighting: bright, dim
-- Background: clean, messy
+To keep conditions comparable:
 
-Total: 3 x 2 x 2 = 12 conditions x 10 labels = 120 images.
+1. Mark fixed camera distances at 1, 3, and 6 feet.
+2. Use one clean surface and one naturally cluttered surface.
+3. Capture all bright images before changing to the dim setup.
+4. Use the rear camera without zoom or flash.
+5. Keep object orientation and camera orientation consistent.
+6. Tap the object to focus before each capture.
+7. Redact private receipt text before adding images to the benchmark set.
+8. Validate the complete set before running inference.
 
-File naming convention: `{label}_{distance}ft_{lighting}_{background}.{ext}`
+```bash
+python -m visual_memory.benchmarks.check_dataset
+```
 
-### Label count note
+## Fixed Split
 
-The plan originally mentioned "8 object types." The actual dataset has 10 labels.
-Two wallet variants (wallet_trifold, wallet_zipper) and two receipt variants
-(receipt_salon, receipt_eye_doctor) are each treated as distinct objects. No label
-collapse or merging is applied. The benchmark evaluates 10-way retrieval.
+The accuracy-hardening split is defined by `benchmarks/split_manifest.json`:
 
----
+- seed: 42
+- training: 60 images, six per label
+- test: 60 images, six per label
+- no file overlap
+- mixed distances, lighting, and backgrounds in both partitions
 
-## Train / Test Split
+This is not a distance-held-out split. The manifest is authoritative and should
+not be regenerated when comparing tuning changes.
 
-Defined in `benchmarks/split_manifest.json` (generated with seed=42, train_per_label=6).
+An older benchmark path uses one near-field reference image per label, all
+1-foot images for projection training, and the 3- and 6-foot images for testing.
+Results from that legacy protocol must be labeled separately from the fixed
+60/60 split.
 
-- 60 train images (6 per label): reference DB construction + projection head training
-- 60 test images (6 per label): retrieval evaluation
+## Scoring
 
-The split is random per label (seed=42). It is NOT stratified by condition, so each
-label's train set may include a mix of distances, lighting, and backgrounds. The
-manifest is the authoritative definition. Do not regenerate it or change the seed.
+- **Correct accept:** the accepted label matches the ground-truth object.
+- **False accept:** the system accepts the wrong label or accepts a known label
+  for a no-match distractor.
+- **Reject:** no candidate satisfies the decision policy.
+- **Uncertain:** the system abstains without counting the query as correct or as
+  a false accept.
+- **Top-k hit:** the correct label appears among the first `k` retrieved labels,
+  regardless of the final decision.
 
-### Legacy benchmark split (pre-hardening)
+## Required Metrics
 
-The existing `full_benchmark.py` uses a different split:
-- Reference DB: 1ft_bright_clean image per label (1 per label)
-- Projection head training: all 1ft images (4 per label)
-- Test: all 3ft and 6ft images (8 per label)
+- top-1 accuracy
+- top-3, top-5, and top-10 recall
+- accepted precision
+- accepted match rate
+- correct accept rate
+- holdout false-positive rate
+- abstention rate
+- per-label and per-condition results
+- latency p50/p95
+- ranked-candidate traces and failure categories
+- operating points at false-positive budgets of 0.05 and 0.10
 
-The new split_manifest.json is for the accuracy hardening workflow. Both splits
-coexist. The hardening plan uses split_manifest.json. Existing benchmark runs
-continue to use the legacy split until full_benchmark.py is updated (Step 0.2).
+Accepted precision and accepted match rate must be reported together so that a
+high-precision, low-coverage policy cannot appear complete.
 
----
+## Hard Cases and Distractors
 
-## Scoring Rules
+The benchmark keeps near-duplicate wallets and receipts in the primary result.
+Additional negative inputs include unrelated objects and same-category objects
+that were never taught to the system.
 
-### Correct match
+After a full run, the focused hard-case report can be generated with:
 
-A query is a correct match if the system returns the true label as the accepted
-result (decision = "accept") and that label matches the query's ground truth label.
+```bash
+scripts/run_hard_cases.sh
+```
 
-### False positive (FP)
+The tuning rationale and hard-case interpretation are documented in
+[Tuning the Personal-Object Matcher](../docs/ACCURACY_TUNING.md).
 
-A query is a false positive if the system accepts a label that does not match
-the ground truth label. This includes:
-- Accepting any wrong label (cross-category or within-category)
-- Accepting a match when the correct answer is "no match" (distractor queries)
+## Running the Benchmark
 
-### False negative / abstention
+Fast smoke test without depth or OCR:
 
-A query is a false negative if:
-- The true label was above threshold but rejected by the margin gate
-  (failure mode: margin_false_reject)
-- The true label was below threshold (failure mode: threshold_false_reject or
-  retrieval_miss)
+```bash
+python -m visual_memory.benchmarks.full_benchmark \
+  --dataset benchmarks/dataset.csv \
+  --images benchmarks/images \
+  --seed 42 --no-depth --no-ocr --epochs 5
+```
 
-A query that produces decision = "uncertain" is counted separately from
-"reject." Uncertain counts toward abstention_rate but is not a FP or FN.
+Full model-backed run:
 
-### Uncertain handling
+```bash
+bash scripts/run_benchmark.sh
+```
 
-For queries where the system outputs decision = "uncertain":
-- Not counted as correct_accept
-- Not counted as false_accept
-- Counted in abstention_rate
-- Reported separately in accepted_risk analysis
+The full run requires the private images, gated model weights, and a
+GPU-capable environment.
 
-### Top-k partial credit
+## Artifacts
 
-Top-k recall (Recall@k) counts a query as a hit if the true label appears
-anywhere in the top-k candidates, regardless of the accept/reject decision.
-This measures retrieval quality independent of decision policy.
+Each run can produce:
 
-### Similar-item ambiguity policy
+- `benchmarks/results.csv`: per-query metrics and latency
+- `benchmarks/results.json`: run metadata and aggregate results
+- `benchmarks/inference_traces.csv`: ranked candidates and component scores
+- `benchmarks/failure_taxonomy.json`: categorized failures
+- `benchmarks/projection_head_bench.pt`: projection weights trained for the run
+- `benchmarks/hard_cases_report.md`: focused review of difficult queries
 
-Near-identical items (wallet_zipper vs wallet_trifold, receipt_salon vs
-receipt_eye_doctor) are treated as distinct objects. A match of wallet_zipper
-when the true label is wallet_trifold is a FP, not an ambiguous case.
-The two wallet variants and two receipt variants are the primary hard cases.
-They are measured separately in hard_cases analysis but are not excluded from
-the main FP rate.
-
----
-
-## Metrics Definitions
-
-| Metric | Definition |
-|---|---|
-| top_1_accuracy | fraction of test queries where accepted label == true label |
-| top_3_recall | fraction where true label is in top-3 candidates (pre-decision) |
-| top_5_recall | fraction where true label is in top-5 candidates |
-| top_10_recall | fraction where true label is in top-10 candidates |
-| accepted_precision | correct_accepts / all_accepts |
-| accepted_match_rate | all_accepts / total_queries (coverage) |
-| correct_accept_rate | correct_accepts / total_queries |
-| holdout_fp_rate | false_accepts / total_queries |
-| abstention_rate | (uncertain + reject) / total_queries |
-| accepted_risk | 1 - accepted_precision |
-| safety_score | see full_benchmark.py composite formula |
-
----
-
-## FP Budget Operating Points
-
-Primary targets for calibration and operating-point selection:
-
-- holdout_fp_rate <= 0.05 (strict)
-- holdout_fp_rate <= 0.10 (production default)
-
-For each budget, report: best threshold and margins, accepted_precision,
-accepted_match_rate, correct_accept_rate, and latency p50/p95.
-
----
-
-## Artifact Paths
-
-All benchmark runs write to `BASELINE_ROOT`:
-
-- Local default: `{repo_root}/benchmarks/baselines/accuracy_hardening/`
-- Server default: `/opt/spaitra/accuracy_hardening_baselines/`
-
-The frozen baseline (first full run after Phase 0 is complete) is saved under:
-`{BASELINE_ROOT}/main/frozen_baseline/`
-
-Do not modify or delete any baseline directory. Append only.
+Archived baselines are append-only. A publishable result must record its code
+SHA, settings, hardware, command, fixed split, and artifact paths together.
