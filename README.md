@@ -82,10 +82,8 @@ latency. This makes the tuning target visible: whether the correct memory was
 missing from the candidate list, or retrieved successfully but rejected or
 misclassified by the final decision policy.
 
-The historical full-stack run showed strong top-k retrieval headroom but weak
-final acceptance precision. That result drove the current separation between
-retrieval, verification, and decision stages. It is evidence from an earlier
-checkpoint, not a claim about current performance. See the
+Benchmark runs show strong top-k retrieval headroom but weak
+final acceptance precision due to high FP. This project was bottlenecked by inference budget, and should only be used as a proof of concept. See the
 [benchmark specification](benchmarks/BENCHMARK_SPEC.md) and
 [matcher-tuning history](docs/ACCURACY_TUNING.md).
 
