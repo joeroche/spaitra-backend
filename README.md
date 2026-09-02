@@ -59,8 +59,8 @@ work.
 ![YOLOE candidate regions in a multi-object desk scene](media/pipeline/scan-result-cropped.jpg)
 
 The boxes above are real YOLOE proposals from a multi-object demo scene. They
-are intentionally unlabeled: the detector finds possible objects, while the
-personal-memory pipeline determines identity.
+are unlabeled candidates: the low-cost detector finds possible objects, while the
+personal-memory pipeline determines identity through semantic similarity.
 
 The evaluation set tests the matcher beyond one favorable scene:
 
